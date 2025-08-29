@@ -1,6 +1,14 @@
 .github/workflows/build-image.yml
 .git
 .gitignore
-.dockerignore
+node_modules
+__pycache__
+downloads
+*.ts
+*.mp4
+*.log
+*.csv
+*.zip
+.DS_Store
 README.md
 LICENSE
