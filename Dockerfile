@@ -1,34 +1,39 @@
-# 基于轻量 Python，并安装 ffmpeg、rclone、inotify-tools
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+ARG DEBIAN_FRONTEND=noninteractive
+# 代理（可选）
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV http_proxy=$HTTP_PROXY https_proxy=$HTTPS_PROXY no_proxy=$NO_PROXY \
+    HTTP_PROXY=$HTTP_PROXY HTTPS_PROXY=$HTTPS_PROXY NO_PROXY=$NO_PROXY \
+    PIP_DEFAULT_TIMEOUT=120 PIP_NO_CACHE_DIR=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg curl ca-certificates unzip inotify-tools \
- && rm -rf /var/lib/apt/lists/*
-
-# 安装 rclone（亦可改为 awscli / boto3）
-RUN curl -fsSL https://rclone.org/install.sh | bash
+# 若设置了代理，让 apt 也跟随
+RUN bash -lc ' \
+  set -eux; \
+  if [ -n "${HTTP_PROXY}" ]; then echo "Acquire::http::Proxy \"${HTTP_PROXY}\";"  > /etc/apt/apt.conf.d/99proxy; fi; \
+  if [ -n "${HTTPS_PROXY}" ]; then echo "Acquire::https::Proxy \"${HTTPS_PROXY}\";" >> /etc/apt/apt.conf.d/99proxy; fi; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
+    ffmpeg rclone curl ca-certificates unzip inotify-tools git; \
+  rm -rf /var/lib/apt/lists/* \
+'
 
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install -r requirements.txt
+# 如果你的项目里已经有 requirements.txt
+COPY requirements.txt ./ 2>/dev/null || true
+RUN if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-COPY . ./
+# 复制全部源码到镜像
+COPY . .
 
-# 录像目录（容器内临时磁盘），Cloudflare Containers 有 2~4GB 本地盘，具体看实例类型
-# 注意：磁盘是临时的，必须再同步到 R2。:contentReference[oaicite:7]{index=7}
-ENV RECORD_DIR=/app/downloads
-RUN mkdir -p ${RECORD_DIR}
+# 运行目录
+ENV RECORD_DIR=/app/downloads \
+    LOG_DIR=/app/logs
+RUN mkdir -p ${RECORD_DIR} ${LOG_DIR}
 
-# 环境变量（通过 Wrangler 注入实际值）
-# R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT, R2_BUCKET, R2_REGION=auto 等
-
-# 启动脚本：并行录制 + 后台周期同步到 R2
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
+# 暴露端口 & 入口
 EXPOSE 8080
-CMD ["docker-entrypoint.sh"]
+CMD ["bash", "-lc", "if [ -x /usr/local/bin/docker-entrypoint.sh ]; then exec /usr/local/bin/docker-entrypoint.sh; else exec python -m http.server 8080; fi"]
