@@ -22,9 +22,15 @@ RUN bash -lc ' \
 '
 
 WORKDIR /app
-# 如果你的项目里已经有 requirements.txt
-COPY requirements.txt ./ 2>/dev/null || true
+# ==== 任选一个块，A 或 B；不要两者都留 ====
+# --- A: 有 requirements.txt 时，缓存友好 ---
+# COPY requirements.txt ./
+# RUN pip install -r requirements.txt
+
+# --- B: requirements.txt 可选（更通用） ---
+COPY . .
 RUN if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+# ===========================================
 
 # 复制全部源码到镜像
 COPY . .
