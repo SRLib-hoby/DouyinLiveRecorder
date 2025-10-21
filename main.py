@@ -22,11 +22,11 @@ import shutil
 import random
 import uuid
 from pathlib import Path
-import urllib.parse
 import urllib.request
 from urllib.error import URLError, HTTPError
 from typing import Any
 import configparser
+import httpx
 from src import spider, stream
 from src.proxy import ProxyDetector
 from src.utils import logger
@@ -382,6 +382,42 @@ def clear_record_info(record_name: str, record_url: str) -> None:
         color_obj.print_colored(f"[{record_name}]已经从录制列表中移除\n", color_obj.YELLOW)
 
 
+def direct_download_stream(source_url: str, save_path: str, record_name: str, live_url: str, platform: str) -> bool:
+
+    try:
+        with open(save_path, 'wb') as f:
+            client = httpx.Client(timeout=None)
+
+            headers = {}
+            header_params = get_record_headers(platform, live_url)
+            if header_params:
+                key, value = header_params.split(":", 1)
+                headers[key] = value
+
+            with client.stream('GET', source_url, headers=headers, follow_redirects=True) as response:
+                if response.status_code != 200:
+                    logger.error(f"请求直播流失败，状态码: {response.status_code}")
+                    return False
+                    
+                downloaded = 0
+                chunk_size = 1024 * 16
+                
+                for chunk in response.iter_bytes(chunk_size):
+                    if live_url in url_comments or exit_recording:
+                        color_obj.print_colored(f"[{record_name}]录制时已被注释或请求停止,下载中断", color_obj.YELLOW)
+                        clear_record_info(record_name, live_url)
+                        return False
+                    
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                print()
+                return True
+    except Exception as e:
+        logger.error(f"FLV下载错误: {e} 发生错误的行数: {e.__traceback__.tb_lineno}")
+        return False
+    
+    
 def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, save_type: str,
                      script_command: str | None = None) -> bool:
     save_file_path = ffmpeg_command[-1]
@@ -474,6 +510,36 @@ def get_quality_code(qn):
         "流畅": "LD"
     }
     return QUALITY_MAPPING.get(qn)
+
+def get_record_headers(platform, live_url):
+    live_domain = '/'.join(live_url.split('/')[0:3])
+    record_headers = {
+        'PandaTV': 'origin:https://www.pandalive.co.kr',
+        'WinkTV': 'origin:https://www.winktv.co.kr',
+        'PopkonTV': 'origin:https://www.popkontv.com',
+        'FlexTV': 'origin:https://www.flextv.co.kr',
+        '千度热播': 'referer:https://qiandurebo.com',
+        '17Live': 'referer:https://17.live/en/live/6302408',
+        '浪Live': 'referer:https://www.lang.live',
+        'shopee': f'origin:{live_domain}',
+        'Blued直播': 'referer:https://app.blued.cn'
+    }
+    return record_headers.get(platform)
+
+
+def is_flv_preferred_platform(link):
+    return any(i in link for i in ["douyin", "tiktok"])
+
+
+def select_source_url(link, stream_info):
+    if is_flv_preferred_platform(link):
+        codec = utils.get_query_params(stream_info.get('flv_url'), "codec")
+        if codec and codec[0] == 'h265':
+            logger.warning("FLV is not supported for h265 codec, use HLS source instead")
+        else:
+            return stream_info.get('flv_url')
+
+    return stream_info.get('record_url')
 
 
 def start_record(url_data: tuple, count_variable: int = -1) -> None:
@@ -686,7 +752,10 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     utils.update_config(
                                         config_file, 'Cookie', 'flextv_cookie', json_data['new_cookies']
                                     )
-                                port_info = asyncio.run(stream.get_stream_url(json_data, record_quality, spec=True))
+                                if 'play_url_list' in json_data:
+                                    port_info = asyncio.run(stream.get_stream_url(json_data, record_quality, spec=True))
+                                else:
+                                    port_info = json_data
                             else:
                                 logger.error("错误信息: 网络异常，请检查本网络是否能正常访问FlexTV直播平台")
 
@@ -1045,7 +1114,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                 time.sleep(push_check_seconds)
                                 continue
 
-                            real_url = port_info.get('record_url')
+                            real_url = select_source_url(record_url, port_info)
                             full_path = f'{default_path}/{platform}'
                             if real_url:
                                 now = datetime.datetime.today().strftime("%Y-%m-%d_%H-%M-%S")
@@ -1081,7 +1150,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     if enable_https_recording and real_url.startswith("http://"):
                                         real_url = real_url.replace("http://", "https://")
 
-                                    http_record_list = ['shopee']
+                                    http_record_list = ['shopee', "migu"]
                                     if platform in http_record_list:
                                         real_url = real_url.replace("https://", "http://")
 
@@ -1125,19 +1194,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     "-avoid_negative_ts", "1"
                                 ]
 
-                                record_headers = {
-                                    'PandaTV': 'origin:https://www.pandalive.co.kr',
-                                    'WinkTV': 'origin:https://www.winktv.co.kr',
-                                    'PopkonTV': 'origin:https://www.popkontv.com',
-                                    'FlexTV': 'origin:https://www.flextv.co.kr',
-                                    '千度热播': 'referer:https://qiandurebo.com',
-                                    '17Live': 'referer:https://17.live/en/live/6302408',
-                                    '浪Live': 'referer:https://www.lang.live',
-                                    'shopee': f'origin:{live_domain}',
-                                    'Blued直播': 'referer:https://app.blued.cn'
-                                }
-
-                                headers = record_headers.get(platform)
+                                headers = get_record_headers(platform, record_url)
                                 if headers:
                                     ffmpeg_command.insert(11, "-headers")
                                     ffmpeg_command.insert(12, headers)
@@ -1153,7 +1210,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                 if show_url:
                                     re_plat = ('WinkTV', 'PandaTV', 'ShowRoom', 'CHZZK', 'Youtube')
                                     if platform in re_plat:
-                                        logger.info(f"{platform} | {anchor_name} | 直播源地址: {port_info['m3u8_url']}")
+                                        logger.info(
+                                            f"{platform} | {anchor_name} | 直播源地址: {port_info.get('m3u8_url')}")
                                     else:
                                         logger.info(
                                             f"{platform} | {anchor_name} | 直播源地址: {real_url}")
@@ -1169,10 +1227,18 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                 if platform in only_audio_platform_list:
                                     only_audio_record = True
 
-                                if only_audio_record or any(i in video_save_type for i in ['MP3', 'M4A']):
+                                record_save_type = video_save_type
+
+                                if is_flv_preferred_platform(record_url) and port_info.get('flv_url'):
+                                    codec = utils.get_query_params(port_info['flv_url'], "codec")
+                                    if codec and codec[0] == 'h265':
+                                        logger.warning("FLV is not supported for h265 codec, use TS format instead")
+                                        record_save_type = "TS"
+
+                                if only_audio_record or any(i in record_save_type for i in ['MP3', 'M4A']):
                                     try:
                                         now = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
-                                        extension = "mp3" if "m4a" not in video_save_type.lower() else "m4a"
+                                        extension = "mp3" if "m4a" not in record_save_type.lower() else "m4a"
                                         name_format = "_%03d" if split_video_by_time else ""
                                         save_file_path = (f"{full_path}/{anchor_name}_{title_in_name}{now}"
                                                           f"{name_format}.{extension}")
@@ -1180,7 +1246,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                         if split_video_by_time:
                                             print(f'\r{anchor_name} 准备开始录制音频: {save_file_path}')
 
-                                            if "MP3" in video_save_type:
+                                            if "MP3" in record_save_type:
                                                 command = [
                                                     "-map", "0:a",
                                                     "-c:a", "libmp3lame",
@@ -1204,7 +1270,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 ]
 
                                         else:
-                                            if "MP3" in video_save_type:
+                                            if "MP3" in record_save_type:
                                                 command = [
                                                     "-map", "0:a",
                                                     "-c:a", "libmp3lame",
@@ -1227,7 +1293,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_name,
                                             record_url,
                                             ffmpeg_command,
-                                            video_save_type,
+                                            record_save_type,
                                             custom_script
                                         )
                                         if comment_end:
@@ -1239,7 +1305,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             error_count += 1
                                             error_window.append(1)
 
-                                if video_save_type == "FLV" or only_flv_record:
+                                if only_flv_record:
+                                    logger.info(f"Use Direct Downloader to Download FLV Stream: {record_url}")
                                     filename = anchor_name + f'_{title_in_name}' + now + '.flv'
                                     save_file_path = f'{full_path}/{filename}'
                                     print(f'{rec_info}/{filename}')
@@ -1256,11 +1323,19 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     try:
                                         flv_url = port_info.get('flv_url')
                                         if flv_url:
-                                            _filepath, _ = urllib.request.urlretrieve(flv_url, save_file_path)
-                                            record_finished = True
+                                            recording.add(record_name)
+                                            start_record_time = datetime.datetime.now()
+                                            recording_time_list[record_name] = [start_record_time, record_quality_zh]
+                                            
+                                            download_success = direct_download_stream(
+                                                flv_url, save_file_path, record_name, record_url, platform
+                                            )
+                                            
+                                            if download_success:
+                                                record_finished = True
+                                                print(f"\n{anchor_name} {time.strftime('%Y-%m-%d %H:%M:%S')} 直播录制完成\n")
+                                            
                                             recording.discard(record_name)
-                                            print(
-                                                f"\n{anchor_name} {time.strftime('%Y-%m-%d %H:%M:%S')} 直播录制完成\n")
                                         else:
                                             logger.debug("未找到FLV直播流，跳过录制")
                                     except Exception as e:
@@ -1268,6 +1343,54 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                         color_obj.print_colored(
                                             f"\n{anchor_name} {time.strftime('%Y-%m-%d %H:%M:%S')} 直播录制出错,请检查网络\n",
                                             color_obj.RED)
+                                        logger.error(f"错误信息: {e} 发生错误的行数: {e.__traceback__.tb_lineno}")
+                                        with max_request_lock:
+                                            error_count += 1
+                                            error_window.append(1)
+
+                                elif record_save_type == "FLV":
+                                    filename = anchor_name + f'_{title_in_name}' + now + ".flv"
+                                    print(f'{rec_info}/{filename}')
+                                    save_file_path = full_path + '/' + filename
+
+                                    try:
+                                        if split_video_by_time:
+                                            now = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
+                                            save_file_path = f"{full_path}/{anchor_name}_{title_in_name}{now}_%03d.flv"
+                                            command = [
+                                                "-map", "0",
+                                                "-c:v", "copy",
+                                                "-c:a", "copy",
+                                                "-bsf:a", "aac_adtstoasc",
+                                                "-f", "segment",
+                                                "-segment_time", split_time,
+                                                "-segment_format", "flv",
+                                                "-reset_timestamps", "1",
+                                                save_file_path
+                                            ]
+
+                                        else:
+                                            command = [
+                                                "-map", "0",
+                                                "-c:v", "copy",
+                                                "-c:a", "copy",
+                                                "-bsf:a", "aac_adtstoasc",
+                                                "-f", "flv",
+                                                "{path}".format(path=save_file_path),
+                                            ]
+                                        ffmpeg_command.extend(command)
+
+                                        comment_end = check_subprocess(
+                                            record_name,
+                                            record_url,
+                                            ffmpeg_command,
+                                            record_save_type,
+                                            custom_script
+                                        )
+                                        if comment_end:
+                                            return
+
+                                    except subprocess.CalledProcessError as e:
                                         logger.error(f"错误信息: {e} 发生错误的行数: {e.__traceback__.tb_lineno}")
                                         with max_request_lock:
                                             error_count += 1
@@ -1299,7 +1422,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                     except Exception as e:
                                         logger.error(f"转码失败: {e} ")
 
-                                elif video_save_type == "MKV":
+                                elif record_save_type == "MKV":
                                     filename = anchor_name + f'_{title_in_name}' + now + ".mkv"
                                     print(f'{rec_info}/{filename}')
                                     save_file_path = full_path + '/' + filename
@@ -1335,7 +1458,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_name,
                                             record_url,
                                             ffmpeg_command,
-                                            video_save_type,
+                                            record_save_type,
                                             custom_script
                                         )
                                         if comment_end:
@@ -1347,7 +1470,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             error_count += 1
                                             error_window.append(1)
 
-                                elif video_save_type == "MP4":
+                                elif record_save_type == "MP4":
                                     filename = anchor_name + f'_{title_in_name}' + now + ".mp4"
                                     print(f'{rec_info}/{filename}')
                                     save_file_path = full_path + '/' + filename
@@ -1382,7 +1505,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_name,
                                             record_url,
                                             ffmpeg_command,
-                                            video_save_type,
+                                            record_save_type,
                                             custom_script
                                         )
                                         if comment_end:
@@ -1418,7 +1541,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 record_name,
                                                 record_url,
                                                 ffmpeg_command,
-                                                video_save_type,
+                                                record_save_type,
                                                 custom_script
                                             )
                                             if comment_end:
@@ -1462,7 +1585,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 record_name,
                                                 record_url,
                                                 ffmpeg_command,
-                                                video_save_type,
+                                                record_save_type,
                                                 custom_script
                                             )
                                             if comment_end:

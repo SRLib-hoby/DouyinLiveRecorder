@@ -600,7 +600,7 @@ async def get_bilibili_room_info_h5(url: str, proxy_addr: OptionalStr = None, co
     api = f'https://api.live.bilibili.com/xlive/web-room/v1/index/getH5InfoByRoom?room_id={room_id}'
     json_str = await async_req(api, proxy_addr=proxy_addr, headers=headers)
     room_info = json.loads(json_str)
-    title = room_info['data']['room_info']['title'] if room_info.get('data') else ''
+    title = room_info['data']['room_info'].get('title') if room_info.get('data') else ''
     return title
 
 
@@ -1375,11 +1375,15 @@ async def get_flextv_stream_data(
             result["anchor_name"] = anchor_name
             play_url = await get_flextv_stream_url(url=url, proxy_addr=proxy_addr, cookies=cookies)
             if play_url:
-                play_url_list = await get_play_url_list(m3u8=play_url, proxy=proxy_addr, header=headers, abroad=True)
-                if play_url_list:
-                    result['m3u8_url'] = play_url
-                    result['play_url_list'] = play_url_list
-                    result['is_live'] = True
+                result['is_live'] = True
+                if '.m3u8' in play_url:
+                    play_url_list = await get_play_url_list(m3u8=play_url, proxy=proxy_addr, header=headers, abroad=True)
+                    if play_url_list:
+                        result['m3u8_url'] = play_url
+                        result['play_url_list'] = play_url_list
+                else:
+                    result['flv_url'] = play_url
+                    result['record_url'] = play_url
         else:
             url2 = f'https://www.ttinglive.com/channels/{user_id}'
             html_str = await async_req(url2, proxy_addr=proxy_addr, headers=headers, abroad=True)
